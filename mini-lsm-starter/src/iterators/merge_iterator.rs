@@ -4,7 +4,6 @@
 use std::cmp::{self};
 use std::collections::binary_heap::PeekMut;
 use std::collections::BinaryHeap;
-use std::iter;
 
 use anyhow::Result;
 
@@ -63,7 +62,7 @@ impl<I: StorageIterator> MergeIterator<I> {
         }
 
         for (idx, iter) in iters.into_iter().enumerate() {
-            if (iter.is_valid()) {
+            if iter.is_valid() {
                 heap.push(HeapWrapper(idx, iter));
             }
         }
@@ -98,7 +97,7 @@ impl<I: 'static + for<'a> StorageIterator<KeyType<'a> = KeySlice<'a>>> StorageIt
     fn next(&mut self) -> Result<()> {
         let current = self.current.as_mut().unwrap();
         while let Some(mut inner_iter) = self.iters.peek_mut() {
-            if (current.1.key() == inner_iter.1.key()) {
+            if current.1.key() == inner_iter.1.key() {
                 if let a @ Err(_) = inner_iter.1.next() {
                     PeekMut::pop(inner_iter);
                     return a;
@@ -111,7 +110,7 @@ impl<I: 'static + for<'a> StorageIterator<KeyType<'a> = KeySlice<'a>>> StorageIt
             }
         }
         current.1.next()?;
-        if (!current.1.is_valid()) {
+        if !current.1.is_valid() {
             if let Some(now) = self.iters.pop() {
                 *current = now;
             }

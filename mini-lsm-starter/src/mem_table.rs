@@ -12,7 +12,7 @@ use crossbeam_skiplist::SkipMap;
 use ouroboros::self_referencing;
 
 use crate::iterators::StorageIterator;
-use crate::key::{self, KeyBytes, KeySlice};
+use crate::key::KeySlice;
 use crate::table::SsTableBuilder;
 use crate::wal::Wal;
 

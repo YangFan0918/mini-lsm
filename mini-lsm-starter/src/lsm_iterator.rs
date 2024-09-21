@@ -2,12 +2,10 @@
 #![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
 
 use crate::{
-    debug,
     iterators::{merge_iterator::MergeIterator, StorageIterator},
     mem_table::MemTableIterator,
 };
 use anyhow::{bail, Ok, Result};
-use bytes::Bytes;
 
 /// Represents the internal type for an LSM iterator. This type will be changed across the tutorial for multiple times.
 type LsmIteratorInner = MergeIterator<MemTableIterator>;

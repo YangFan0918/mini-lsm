@@ -1,7 +1,7 @@
 #![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
 #![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
 
-use anyhow::Result;
+use anyhow::{Ok, Result};
 
 use super::StorageIterator;
 
@@ -10,6 +10,7 @@ use super::StorageIterator;
 pub struct TwoMergeIterator<A: StorageIterator, B: StorageIterator> {
     a: A,
     b: B,
+    choose_a: bool,
     // Add fields as need
 }
 
@@ -18,8 +19,33 @@ impl<
         B: 'static + for<'a> StorageIterator<KeyType<'a> = A::KeyType<'a>>,
     > TwoMergeIterator<A, B>
 {
+    pub fn skip_b(&mut self) -> Result<()> {
+        if self.a.is_valid() && self.b.is_valid() && self.a.key() == self.b.key() {
+            self.b.next()?;
+        }
+        Ok(())
+    }
+    pub fn choose_a(a: &A, b: &B) -> bool {
+        if !a.is_valid() {
+            return false;
+        }
+
+        if !b.is_valid() {
+            return true;
+        }
+
+        a.key() < b.key()
+    }
+
     pub fn create(a: A, b: B) -> Result<Self> {
-        unimplemented!()
+        let mut iterator = Self {
+            a,
+            b,
+            choose_a: false,
+        };
+        iterator.skip_b()?;
+        iterator.choose_a = TwoMergeIterator::choose_a(&iterator.a, &iterator.b);
+        Ok(iterator)
     }
 }
 
@@ -31,18 +57,34 @@ impl<
     type KeyType<'a> = A::KeyType<'a>;
 
     fn key(&self) -> Self::KeyType<'_> {
-        unimplemented!()
+        if self.choose_a {
+            return self.a.key();
+        }
+        self.b.key()
     }
 
     fn value(&self) -> &[u8] {
-        unimplemented!()
+        if self.choose_a {
+            return self.a.value();
+        }
+        self.b.value()
     }
 
     fn is_valid(&self) -> bool {
-        unimplemented!()
+        if self.choose_a {
+            return self.a.is_valid();
+        }
+        self.b.is_valid()
     }
 
     fn next(&mut self) -> Result<()> {
-        unimplemented!()
+        if self.choose_a {
+            self.a.next()?;
+        } else {
+            self.b.next()?;
+        }
+        self.skip_b()?;
+        self.choose_a = Self::choose_a(&self.a, &self.b);
+        Ok(())
     }
 }

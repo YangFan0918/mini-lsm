@@ -1,21 +1,56 @@
 #![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
 #![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
 
+use crate::table::SsTableIterator;
 use crate::{
-    iterators::{merge_iterator::MergeIterator, StorageIterator},
+    iterators::{
+        merge_iterator::MergeIterator, two_merge_iterator::TwoMergeIterator, StorageIterator,
+    },
     mem_table::MemTableIterator,
 };
 use anyhow::{bail, Ok, Result};
+use bytes::Bytes;
+use std::ops::Bound;
 
 /// Represents the internal type for an LSM iterator. This type will be changed across the tutorial for multiple times.
-type LsmIteratorInner = MergeIterator<MemTableIterator>;
+type LsmIteratorInner =
+    TwoMergeIterator<MergeIterator<MemTableIterator>, MergeIterator<SsTableIterator>>;
 pub struct LsmIterator {
     inner: LsmIteratorInner,
+    upper: Bound<Bytes>,
+    is_valid: bool,
 }
 
 impl LsmIterator {
-    pub(crate) fn new(iter: LsmIteratorInner) -> Result<Self> {
-        Ok(Self { inner: iter })
+    pub(crate) fn new(iter: LsmIteratorInner, upper: Bound<Bytes>) -> Result<Self> {
+        let mut iterator = Self {
+            is_valid: iter.is_valid(),
+            inner: iter,
+            upper,
+        };
+        iterator.move_to_no_delete()?;
+        Ok(iterator)
+    }
+
+    fn next_inner(&mut self) -> Result<()> {
+        self.inner.next()?;
+        if !self.inner.is_valid() {
+            self.is_valid = false;
+            return Ok(());
+        }
+
+        match self.upper.as_ref() {
+            Bound::Unbounded => {}
+            Bound::Excluded(key) => self.is_valid = self.inner.key().raw_ref() < key.as_ref(),
+            Bound::Included(key) => self.is_valid = self.inner.key().raw_ref() <= key.as_ref(),
+        };
+        Ok(())
+    }
+    fn move_to_no_delete(&mut self) -> Result<()> {
+        while self.is_valid() && self.value().is_empty() {
+            self.next_inner()?;
+        }
+        Ok(())
     }
 }
 
@@ -23,7 +58,7 @@ impl StorageIterator for LsmIterator {
     type KeyType<'a> = &'a [u8];
 
     fn is_valid(&self) -> bool {
-        self.inner.is_valid()
+        self.is_valid
     }
 
     fn key(&self) -> &[u8] {
@@ -35,24 +70,8 @@ impl StorageIterator for LsmIterator {
     }
 
     fn next(&mut self) -> Result<()> {
-        self.inner.next()?;
-
-        while !self.inner.is_valid() {
-            if self.inner.key().is_empty() {
-                break;
-            }
-            self.inner.next()?;
-        }
-
-        while self.inner.value().is_empty() {
-            if self.inner.key().is_empty() {
-                break;
-            }
-            self.inner.next()?;
-        }
-        if !self.key().is_empty() && self.value().is_empty() {
-            panic!("error");
-        }
+        self.next_inner()?;
+        self.move_to_no_delete()?;
         Ok(())
     }
 }

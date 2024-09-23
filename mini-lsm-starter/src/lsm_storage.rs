@@ -1,14 +1,14 @@
 #![allow(dead_code)] // REMOVE THIS LINE after fully implementing this functionality
 
+use anyhow::Context;
+use anyhow::{Ok, Result};
+use bytes::Bytes;
+use parking_lot::{Mutex, MutexGuard, RwLock};
 use std::collections::HashMap;
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
-
-use anyhow::{Ok, Result};
-use bytes::Bytes;
-use parking_lot::{Mutex, MutexGuard, RwLock};
 
 use crate::block::Block;
 use crate::compact::{
@@ -18,14 +18,43 @@ use crate::compact::{
 use crate::iterators::merge_iterator::MergeIterator;
 use crate::iterators::two_merge_iterator::TwoMergeIterator;
 use crate::iterators::StorageIterator;
+use crate::key::KeyBytes;
 use crate::key::KeySlice;
 use crate::lsm_iterator::{FusedIterator, LsmIterator};
 use crate::manifest::Manifest;
 use crate::mem_table::MemTable;
 use crate::mvcc::LsmMvccInner;
+use crate::table::SsTableBuilder;
 use crate::table::{SsTable, SsTableIterator};
 
 pub type BlockCache = moka::sync::Cache<(usize, usize), Arc<Block>>;
+
+pub fn range_over(
+    left: Bound<&[u8]>,
+    right: Bound<&[u8]>,
+    lower: &KeyBytes,
+    upper: &KeyBytes,
+) -> bool {
+    match right {
+        Bound::Excluded(v) if v <= lower.raw_ref() => {
+            return false;
+        }
+        Bound::Included(v) if v < lower.raw_ref() => {
+            return false;
+        }
+        _ => {}
+    };
+    match left {
+        Bound::Excluded(v) if upper.raw_ref() <= v => {
+            return false;
+        }
+        Bound::Included(v) if upper.raw_ref() < v => {
+            return false;
+        }
+        _ => {}
+    };
+    true
+}
 
 /// Represents the state of the storage engine.
 #[derive(Clone)]
@@ -158,7 +187,14 @@ impl Drop for MiniLsm {
 
 impl MiniLsm {
     pub fn close(&self) -> Result<()> {
-        unimplemented!()
+        self.flush_notifier.send(()).ok();
+        let mut flush_thread = self.flush_thread.lock();
+        if let Some(flush_thread) = flush_thread.take() {
+            flush_thread
+                .join()
+                .map_err(|e| anyhow::anyhow!("{:?}", e))?;
+        }
+        Ok(())
     }
 
     /// Start the storage engine by either loading an existing directory or creating a new one if the directory does
@@ -256,6 +292,10 @@ impl LsmStorageInner {
             CompactionOptions::NoCompaction => CompactionController::NoCompaction,
         };
 
+        if !path.exists() {
+            std::fs::create_dir_all(path).context("failed to create DB dir")?;
+        }
+
         let storage = Self {
             state: Arc::new(RwLock::new(Arc::new(state))),
             state_lock: Mutex::new(()),
@@ -341,13 +381,13 @@ impl LsmStorageInner {
 
     /// Put a key-value pair into the storage by writing into the current memtable.
     pub fn put(&self, _key: &[u8], _value: &[u8]) -> Result<()> {
+        let state_lock = self.state_lock.lock();
         let memtable = self.state.read();
         let answer = memtable.memtable.put(_key, _value);
         if answer.is_err() {
             return Err(anyhow::anyhow!("查入失败"));
         }
         if memtable.memtable.approximate_size() > self.options.num_memtable_limit {
-            let state_lock = self.state_lock.lock();
             if memtable.memtable.approximate_size() > self.options.num_memtable_limit {
                 drop(memtable);
                 self.force_freeze_memtable(&state_lock)?;
@@ -358,13 +398,13 @@ impl LsmStorageInner {
 
     /// Remove a key from the storage by writing an empty value.
     pub fn delete(&self, _key: &[u8]) -> Result<()> {
+        let state_lock = self.state_lock.lock();
         let memtable = self.state.read();
         let answer = memtable.memtable.put(_key, &[]);
         if answer.is_err() {
             return Err(anyhow::anyhow!("删除失败"));
         }
         if memtable.memtable.approximate_size() >= self.options.num_memtable_limit {
-            let state_lock = self.state_lock.lock();
             if memtable.memtable.approximate_size() >= self.options.num_memtable_limit {
                 drop(memtable);
                 self.force_freeze_memtable(&state_lock)?;
@@ -407,7 +447,34 @@ impl LsmStorageInner {
 
     /// Force flush the earliest-created immutable memtable to disk
     pub fn force_flush_next_imm_memtable(&self) -> Result<()> {
-        unimplemented!()
+        let state_lock = self.state_lock.lock();
+        let flush_memtable;
+        {
+            let guard = self.state.read();
+            flush_memtable = guard
+                .imm_memtables
+                .last()
+                .expect("no imm memtables!")
+                .clone();
+        }
+
+        let mut builder = SsTableBuilder::new(self.options.block_size);
+        flush_memtable.flush(&mut builder)?;
+        let sst_id = flush_memtable.id();
+        let sstable = Arc::new(builder.build(
+            sst_id,
+            Some(self.block_cache.clone()),
+            self.path_of_sst(sst_id),
+        )?);
+        {
+            let mut guard = self.state.write();
+            let mut snapshot = guard.as_ref().clone();
+            snapshot.imm_memtables.pop();
+            snapshot.l0_sstables.insert(0, sst_id);
+            snapshot.sstables.insert(sst_id, sstable);
+            *guard = Arc::new(snapshot);
+        }
+        Ok(())
     }
 
     pub fn new_txn(&self) -> Result<()> {
@@ -446,10 +513,12 @@ impl LsmStorageInner {
         };
         for sst_id in &snapshot.l0_sstables {
             if let Some(sst) = snapshot.sstables.get(sst_id) {
-                sst_iterators.push(Box::new(SsTableIterator::create_and_seek_to_key(
-                    Arc::clone(sst),
-                    lower_key,
-                )?));
+                if range_over(_lower, _upper, sst.first_key(), sst.last_key()) {
+                    sst_iterators.push(Box::new(SsTableIterator::create_and_seek_to_key(
+                        Arc::clone(sst),
+                        lower_key,
+                    )?));
+                }
             }
         }
         let sst_table = MergeIterator::create(sst_iterators);
@@ -459,7 +528,7 @@ impl LsmStorageInner {
         match _lower {
             Bound::Included(key) => {}
             Bound::Excluded(key) => {
-                if lsmiterator.key() == lower_key.raw_ref() {
+                if lsmiterator.is_valid() && lsmiterator.key() == lower_key.raw_ref() {
                     lsmiterator.next()?;
                 }
             }

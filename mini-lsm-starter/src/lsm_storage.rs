@@ -344,6 +344,12 @@ impl LsmStorageInner {
             let mut sst_iterator_vec = Vec::new();
             for sst_id in &snapshot.l0_sstables {
                 if let Some(sst) = snapshot.sstables.get(sst_id) {
+                    if let Some(bloom_filter) = &sst.bloom {
+                        let hash = farmhash::fingerprint32(_key);
+                        if !bloom_filter.may_contain(hash) {
+                            continue;
+                        }
+                    }
                     sst_iterator_vec.push(Box::new(SsTableIterator::create_and_seek_to_key(
                         Arc::clone(sst),
                         key,

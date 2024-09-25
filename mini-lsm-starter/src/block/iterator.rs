@@ -42,6 +42,7 @@ impl BlockIterator {
     /// Creates a block iterator and seek to the first key that >= `key`.
     pub fn create_and_seek_to_key(block: Arc<Block>, key: KeySlice) -> Self {
         let mut block_iterator = BlockIterator::new(block);
+        block_iterator.seek_to_first();
         block_iterator.seek_to_key(key);
         block_iterator
     }
@@ -77,8 +78,10 @@ impl BlockIterator {
                 self.block.offsets[1]
             }
         };
-        self.key = KeyVec::from_vec(self.block.data[0..end as usize].to_vec());
+        self.key = KeyVec::from_vec(self.block.data[2..end as usize].to_vec());
+        let key_len = u16::from_le_bytes([self.key.raw_ref()[0], self.key.raw_ref()[1]]);
         self.idx = 0;
+        self.first_key = KeyVec::from_vec(self.key.raw_ref()[2..2 + key_len as usize].to_vec());
     }
 
     /// Move to the next key in the block.
@@ -97,7 +100,16 @@ impl BlockIterator {
                 }
             };
             self.idx = now_idx + 1;
-            self.key = KeyVec::from_vec(self.block.data[start as usize..end as usize].to_vec());
+            let entry = self.block.data[start as usize..end as usize].to_vec();
+            let key_overlap_len = u16::from_le_bytes([entry[0], entry[1]]);
+            let rest_key_len = u16::from_le_bytes([entry[2], entry[3]]);
+            self.key.clear();
+            let combined_len = key_overlap_len + rest_key_len;
+            let combined_len_bytes = combined_len.to_le_bytes();
+            self.key.append(&combined_len_bytes);
+            self.key
+                .append(&self.first_key.raw_ref()[..key_overlap_len as usize]);
+            self.key.append(&entry[4..]);
         }
     }
 

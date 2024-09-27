@@ -15,6 +15,7 @@ use crate::compact::{
     CompactionController, CompactionOptions, LeveledCompactionController, LeveledCompactionOptions,
     SimpleLeveledCompactionController, SimpleLeveledCompactionOptions, TieredCompactionController,
 };
+use crate::iterators::concat_iterator::SstConcatIterator;
 use crate::iterators::merge_iterator::MergeIterator;
 use crate::iterators::two_merge_iterator::TwoMergeIterator;
 use crate::iterators::StorageIterator;
@@ -356,14 +357,24 @@ impl LsmStorageInner {
                     )?));
                 }
             }
+            let mut l1_iterator_vec = Vec::new();
+            for l1_id in &snapshot.levels[0].1 {
+                l1_iterator_vec.push(snapshot.sstables.get(l1_id).unwrap().clone());
+            }
             let sst_ierator = MergeIterator::create(sst_iterator_vec);
-            if sst_ierator.is_valid() {
-                if sst_ierator.key().raw_ref() == _key {
+            let l1_iterator = SstConcatIterator::create_and_seek_to_key(
+                l1_iterator_vec,
+                KeySlice::from_slice(_key),
+            )?;
+            if sst_ierator.is_valid() || l1_iterator.is_valid() {
+                if sst_ierator.is_valid() && sst_ierator.key().raw_ref() == _key {
                     if sst_ierator.value().is_empty() {
                         return Ok(None);
                     } else {
                         return Ok(Some(Bytes::copy_from_slice(sst_ierator.value())));
                     }
+                } else if l1_iterator.is_valid() && l1_iterator.key().raw_ref() == _key {
+                    return Ok(Some(Bytes::copy_from_slice(l1_iterator.value())));
                 } else {
                     return Ok(None);
                 }
@@ -528,13 +539,23 @@ impl LsmStorageInner {
             }
         }
         let sst_table = MergeIterator::create(sst_iterators);
-        let mut lsmiterator =
-            LsmIterator::new(TwoMergeIterator::create(merge_table, sst_table)?, upper_key)?;
+        let merge_iterator_1 = TwoMergeIterator::create(merge_table, sst_table)?;
+        let mut l1_iterator_vec = Vec::new();
+        for l1_id in &snapshot.levels[0].1 {
+            l1_iterator_vec.push(snapshot.sstables.get(l1_id).unwrap().clone());
+        }
+        let mut lsmiterator = LsmIterator::new(
+            TwoMergeIterator::create(
+                merge_iterator_1,
+                SstConcatIterator::create_and_seek_to_key(l1_iterator_vec, lower_key)?,
+            )?,
+            upper_key,
+        )?;
 
         match _lower {
             Bound::Included(key) => {}
             Bound::Excluded(key) => {
-                if lsmiterator.is_valid() && lsmiterator.key() == lower_key.raw_ref() {
+                while lsmiterator.is_valid() && lsmiterator.key() <= lower_key.raw_ref() {
                     lsmiterator.next()?;
                 }
             }

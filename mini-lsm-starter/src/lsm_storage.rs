@@ -357,15 +357,20 @@ impl LsmStorageInner {
                     )?));
                 }
             }
-            let mut l1_iterator_vec = Vec::new();
-            for l1_id in &snapshot.levels[0].1 {
-                l1_iterator_vec.push(snapshot.sstables.get(l1_id).unwrap().clone());
+            let mut level_iterator_vec = Vec::new();
+            for (height, vec) in snapshot.levels.iter() {
+                let vec_arc_sst = vec
+                    .iter()
+                    .map(|x| snapshot.sstables.get(x).unwrap().clone())
+                    .collect::<Vec<_>>();
+                level_iterator_vec.push(Box::new(SstConcatIterator::create_and_seek_to_key(
+                    vec_arc_sst,
+                    KeySlice::from_slice(_key),
+                )?));
             }
+
             let sst_ierator = MergeIterator::create(sst_iterator_vec);
-            let l1_iterator = SstConcatIterator::create_and_seek_to_key(
-                l1_iterator_vec,
-                KeySlice::from_slice(_key),
-            )?;
+            let l1_iterator = MergeIterator::create(level_iterator_vec);
             if sst_ierator.is_valid() || l1_iterator.is_valid() {
                 if sst_ierator.is_valid() && sst_ierator.key().raw_ref() == _key {
                     if sst_ierator.value().is_empty() {
@@ -398,14 +403,15 @@ impl LsmStorageInner {
 
     /// Put a key-value pair into the storage by writing into the current memtable.
     pub fn put(&self, _key: &[u8], _value: &[u8]) -> Result<()> {
-        let state_lock = self.state_lock.lock();
-        let memtable = self.state.read();
-        let answer = memtable.memtable.put(_key, _value);
-        if answer.is_err() {
-            return Err(anyhow::anyhow!("查入失败"));
-        }
-        if memtable.memtable.approximate_size() > self.options.num_memtable_limit {
-            if memtable.memtable.approximate_size() > self.options.num_memtable_limit {
+        let size = {
+            let memtable = self.state.read();
+            memtable.memtable.put(_key, _value)?;
+            memtable.memtable.approximate_size()
+        };
+        if size > self.options.target_sst_size {
+            let state_lock = self.state_lock.lock();
+            let memtable = self.state.read();
+            if memtable.memtable.approximate_size() > self.options.target_sst_size {
                 drop(memtable);
                 self.force_freeze_memtable(&state_lock)?;
             }
@@ -415,14 +421,15 @@ impl LsmStorageInner {
 
     /// Remove a key from the storage by writing an empty value.
     pub fn delete(&self, _key: &[u8]) -> Result<()> {
-        let state_lock = self.state_lock.lock();
-        let memtable = self.state.read();
-        let answer = memtable.memtable.put(_key, &[]);
-        if answer.is_err() {
-            return Err(anyhow::anyhow!("删除失败"));
-        }
-        if memtable.memtable.approximate_size() >= self.options.num_memtable_limit {
-            if memtable.memtable.approximate_size() >= self.options.num_memtable_limit {
+        let size = {
+            let memtable = self.state.read();
+            memtable.memtable.put(_key, &[])?;
+            memtable.memtable.approximate_size()
+        };
+        if size > self.options.target_sst_size {
+            let state_lock = self.state_lock.lock();
+            let memtable = self.state.read();
+            if memtable.memtable.approximate_size() > self.options.target_sst_size {
                 drop(memtable);
                 self.force_freeze_memtable(&state_lock)?;
             }
@@ -459,6 +466,7 @@ impl LsmStorageInner {
         let old_memtable = std::mem::replace(&mut snapshot.memtable, new_memtable);
         snapshot.imm_memtables.insert(0, old_memtable.clone());
         *state = Arc::new(snapshot);
+        drop(state);
         Ok(())
     }
 
@@ -540,15 +548,19 @@ impl LsmStorageInner {
         }
         let sst_table = MergeIterator::create(sst_iterators);
         let merge_iterator_1 = TwoMergeIterator::create(merge_table, sst_table)?;
-        let mut l1_iterator_vec = Vec::new();
-        for l1_id in &snapshot.levels[0].1 {
-            l1_iterator_vec.push(snapshot.sstables.get(l1_id).unwrap().clone());
+        let mut level_iterator_vec: Vec<Box<SstConcatIterator>> = Vec::new();
+        for (height, vec) in snapshot.levels.iter() {
+            let vec_arc_sst = vec
+                .iter()
+                .map(|x| snapshot.sstables.get(x).unwrap().clone())
+                .collect::<Vec<_>>();
+            level_iterator_vec.push(Box::new(SstConcatIterator::create_and_seek_to_key(
+                vec_arc_sst,
+                lower_key,
+            )?));
         }
         let mut lsmiterator = LsmIterator::new(
-            TwoMergeIterator::create(
-                merge_iterator_1,
-                SstConcatIterator::create_and_seek_to_key(l1_iterator_vec, lower_key)?,
-            )?,
+            TwoMergeIterator::create(merge_iterator_1, MergeIterator::create(level_iterator_vec))?,
             upper_key,
         )?;
 

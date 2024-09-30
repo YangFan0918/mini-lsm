@@ -213,6 +213,23 @@ impl LsmStorageInner {
                     self.compact_generate_sst_from_iter(two_merge_iterator)
                 }
             },
+            CompactionTask::Tiered(TieredCompactionTask {
+                tiers,
+                bottom_tier_included,
+            }) => {
+                let mut iterator = Vec::new();
+                for (_, vec) in tiers {
+                    let mut sst_id = Vec::new();
+                    for id in vec {
+                        sst_id.push(snapshot.sstables.get(id).unwrap().clone());
+                    }
+                    iterator.push(Box::new(SstConcatIterator::create_and_seek_to_first(
+                        sst_id,
+                    )?));
+                }
+                let merge_iterator = MergeIterator::create(iterator);
+                self.compact_generate_sst_from_iter(merge_iterator)
+            }
             _ => Ok(Vec::new()),
         }
     }

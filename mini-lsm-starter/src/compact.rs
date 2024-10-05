@@ -136,7 +136,7 @@ impl LsmStorageInner {
             iter.next()?;
         }
 
-        if sst_builder.estimated_size() > 0 {
+        if sst_builder.estimated_size() > 5 {
             let sst_id = self.next_sst_id();
             new_sst.push(Arc::new(sst_builder.build(
                 sst_id,
@@ -230,7 +230,46 @@ impl LsmStorageInner {
                 let merge_iterator = MergeIterator::create(iterator);
                 self.compact_generate_sst_from_iter(merge_iterator)
             }
-            _ => Ok(Vec::new()),
+            CompactionTask::Leveled(LeveledCompactionTask {
+                upper_level,
+                upper_level_sst_ids,
+                lower_level,
+                lower_level_sst_ids,
+                is_lower_level_bottom_level,
+            }) => match upper_level {
+                Some(_) => {
+                    let mut upper_ierator = Vec::with_capacity(upper_level_sst_ids.len());
+                    for x in upper_level_sst_ids.iter() {
+                        upper_ierator.push(snapshot.sstables.get(x).unwrap().clone());
+                    }
+                    let mut lower_iterator = Vec::with_capacity(lower_level_sst_ids.len());
+                    for x in lower_level_sst_ids.iter() {
+                        lower_iterator.push(snapshot.sstables.get(x).unwrap().clone());
+                    }
+                    let two_merge_iterator = TwoMergeIterator::create(
+                        SstConcatIterator::create_and_seek_to_first(upper_ierator)?,
+                        SstConcatIterator::create_and_seek_to_first(lower_iterator)?,
+                    )?;
+                    self.compact_generate_sst_from_iter(two_merge_iterator)
+                }
+                None => {
+                    let mut upper_ierator = Vec::with_capacity(upper_level_sst_ids.len());
+                    for x in upper_level_sst_ids.iter() {
+                        upper_ierator.push(Box::new(SsTableIterator::create_and_seek_to_first(
+                            snapshot.sstables.get(x).unwrap().clone(),
+                        )?));
+                    }
+                    let mut lower_iterator = Vec::with_capacity(lower_level_sst_ids.len());
+                    for x in lower_level_sst_ids.iter() {
+                        lower_iterator.push(snapshot.sstables.get(x).unwrap().clone());
+                    }
+                    let two_merge_iterator = TwoMergeIterator::create(
+                        MergeIterator::create(upper_ierator),
+                        SstConcatIterator::create_and_seek_to_first(lower_iterator)?,
+                    )?;
+                    self.compact_generate_sst_from_iter(two_merge_iterator)
+                }
+            },
         }
     }
 
@@ -283,7 +322,7 @@ impl LsmStorageInner {
     fn trigger_compaction(&self) -> Result<()> {
         let snapshot = {
             let state = self.state.read();
-            state.as_ref().clone()
+            state.clone()
         };
         if let Some(task) = self
             .compaction_controller
@@ -294,22 +333,19 @@ impl LsmStorageInner {
             let new_sst_id = new_sst.iter().map(|sst| sst.sst_id()).collect::<Vec<_>>();
 
             let state_lock = self.state_lock.lock();
-            let state = self.state.read();
-            let snapshot = state.as_ref().clone();
+            let mut snapshot = self.state.read().as_ref().clone();
+            for sst in new_sst {
+                snapshot.sstables.insert(sst.sst_id(), sst.clone());
+            }
             let (mut snapshot, file_need_to_move) = self
                 .compaction_controller
-                .apply_compaction_result(&snapshot, &task, &new_sst_id, true);
+                .apply_compaction_result(&snapshot, &task, &new_sst_id, false);
             for x in file_need_to_move {
                 std::fs::remove_file(self.path_of_sst(x))?;
                 snapshot.sstables.remove(&x);
             }
-            for sst in &new_sst {
-                snapshot.sstables.insert(sst.sst_id(), sst.clone());
-            }
-            drop(state);
             let mut state = self.state.write();
             *state = Arc::new(snapshot);
-            drop(state);
         }
         Ok(())
     }

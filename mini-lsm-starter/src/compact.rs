@@ -4,6 +4,7 @@ mod leveled;
 mod simple_leveled;
 mod tiered;
 use crate::key::KeySlice;
+use crate::manifest::ManifestRecord;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -280,8 +281,8 @@ impl LsmStorageInner {
         };
         let sst_to_compact_copy: (Vec<usize>, Vec<usize>) = sst_to_compact.clone();
         let new_sst = self.compact(&CompactionTask::ForceFullCompaction {
-            l0_sstables: (sst_to_compact.0),
-            l1_sstables: (sst_to_compact.1),
+            l0_sstables: (sst_to_compact.0.clone()),
+            l1_sstables: (sst_to_compact.1.clone()),
         })?;
         let mut new_sst_id = Vec::new();
         for sst in &new_sst {
@@ -295,7 +296,7 @@ impl LsmStorageInner {
             for _ in 0..sst_to_compact_copy.0.len() {
                 snapshot.l0_sstables.pop();
             }
-            snapshot.levels[0].1 = new_sst_id;
+            snapshot.levels[0].1 = new_sst_id.clone();
             for sst_id in &sst_to_compact_copy.0 {
                 let entry = snapshot.sstables.get(sst_id);
                 if let Some(value) = entry {
@@ -315,6 +316,17 @@ impl LsmStorageInner {
             }
 
             *state = Arc::new(snapshot);
+            self.sync_dir()?;
+            self.manifest.as_ref().unwrap().add_record(
+                &state_lock,
+                ManifestRecord::Compaction(
+                    CompactionTask::ForceFullCompaction {
+                        l0_sstables: (sst_to_compact.0),
+                        l1_sstables: (sst_to_compact.1),
+                    },
+                    new_sst_id.clone(),
+                ),
+            )?;
         }
         Ok(())
     }
@@ -346,6 +358,12 @@ impl LsmStorageInner {
             }
             let mut state = self.state.write();
             *state = Arc::new(snapshot);
+            drop(state);
+            self.sync_dir()?;
+            self.manifest
+                .as_ref()
+                .unwrap()
+                .add_record(&state_lock, ManifestRecord::Compaction(task, new_sst_id))?;
         }
         Ok(())
     }

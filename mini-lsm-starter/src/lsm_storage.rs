@@ -13,7 +13,7 @@ use crate::key::KeyBytes;
 use crate::key::KeySlice;
 use crate::lsm_iterator::{FusedIterator, LsmIterator};
 use crate::manifest::{Manifest, ManifestRecord};
-use crate::mem_table::MemTable;
+use crate::mem_table::{self, MemTable};
 use crate::mvcc::LsmMvccInner;
 use crate::table::FileObject;
 use crate::table::SsTableBuilder;
@@ -449,7 +449,7 @@ impl LsmStorageInner {
     }
 
     pub fn sync(&self) -> Result<()> {
-        unimplemented!()
+        self.state.read().memtable.sync_wal()
     }
 
     pub fn add_compaction_filter(&self, compaction_filter: CompactionFilter) {
@@ -617,7 +617,16 @@ impl LsmStorageInner {
         let mut state = self.state.write();
         let mut snapshot = state.as_ref().clone();
         let next_id = self.next_sst_id();
-        let new_memtable = Arc::new(MemTable::create(next_id));
+        let new_memtable = {
+            if self.options.enable_wal == true {
+                Arc::new(MemTable::create_with_wal(
+                    next_id,
+                    self.path_of_wal(next_id),
+                )?)
+            } else {
+                Arc::new(MemTable::create(next_id))
+            }
+        };
         let old_memtable = std::mem::replace(&mut snapshot.memtable, new_memtable);
         snapshot.imm_memtables.insert(0, old_memtable.clone());
         *state = Arc::new(snapshot);

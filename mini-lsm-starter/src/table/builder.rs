@@ -7,13 +7,17 @@ use std::path::Path;
 use std::sync::Arc;
 
 use super::{bloom::Bloom, BlockMeta, FileObject, SsTable};
-use crate::{block::BlockBuilder, key::KeyBytes, key::KeySlice, lsm_storage::BlockCache};
+use crate::{
+    block::BlockBuilder,
+    key::{KeySlice, KeyVec},
+    lsm_storage::BlockCache,
+};
 
 /// Builds an SSTable from key-value pairs.
 pub struct SsTableBuilder {
     builder: BlockBuilder,
-    first_key: Vec<u8>,
-    last_key: Vec<u8>,
+    first_key: KeyVec,
+    last_key: KeyVec,
     data: Vec<u8>,
     pub(crate) meta: Vec<BlockMeta>,
     block_size: usize,
@@ -25,8 +29,8 @@ impl SsTableBuilder {
     pub fn new(block_size: usize) -> Self {
         Self {
             builder: BlockBuilder::new(block_size),
-            first_key: Vec::new(),
-            last_key: Vec::new(),
+            first_key: KeyVec::new(),
+            last_key: KeyVec::new(),
             data: Vec::new(),
             meta: Vec::new(),
             block_size,
@@ -45,11 +49,11 @@ impl SsTableBuilder {
                 panic!("error!!!");
             }
         }
-        self.key_hash.push(farmhash::fingerprint32(&key.raw_ref()));
+        self.key_hash.push(farmhash::fingerprint32(&key.key_ref()));
         if self.first_key.is_empty() {
-            self.first_key = key.to_key_vec().into_inner();
+            self.first_key = key.to_key_vec();
         }
-        self.last_key = key.to_key_vec().into_inner();
+        self.last_key = key.to_key_vec();
     }
 
     pub fn finish_block(&mut self) {
@@ -57,8 +61,8 @@ impl SsTableBuilder {
             std::mem::replace(&mut self.builder, BlockBuilder::new(self.block_size));
         let block = block_builder.build();
         let block_mate = BlockMeta {
-            first_key: KeyBytes::from_bytes(self.first_key.clone().into()),
-            last_key: KeyBytes::from_bytes(self.last_key.clone().into()),
+            first_key: std::mem::take(&mut self.first_key).into_key_bytes(),
+            last_key: std::mem::take(&mut self.last_key).into_key_bytes(),
             offset: self.data.len(),
         };
         self.meta.push(block_mate);

@@ -1,6 +1,8 @@
 #![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
 #![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
 
+use bytes::BufMut;
+
 use super::Block;
 use crate::key::{KeySlice, KeyVec};
 use std::cmp::min;
@@ -41,10 +43,10 @@ impl BlockBuilder {
     #[must_use]
     pub fn add(&mut self, key: KeySlice, value: &[u8]) -> bool {
         let mut keykey_overlap_len: u16 = 0;
-        let mut rest_key_len: u16 = key.len() as u16;
+        let mut rest_key_len: u16 = key.key_len() as u16;
         if !self.first_key.is_empty() {
-            keykey_overlap_len = get_common_prefix(self.first_key.raw_ref(), &key.raw_ref());
-            rest_key_len = key.len() as u16 - keykey_overlap_len;
+            keykey_overlap_len = get_common_prefix(self.first_key.key_ref(), &key.key_ref());
+            rest_key_len = key.key_len() as u16 - keykey_overlap_len;
         }
         if !self.data.is_empty()
             && (self.offsets.len() + 1) * 2
@@ -70,14 +72,15 @@ impl BlockBuilder {
 
         //add key
         self.data
-            .extend_from_slice(&key.raw_ref()[keykey_overlap_len as usize..]);
+            .extend_from_slice(&key.key_ref()[keykey_overlap_len as usize..]);
+        // add timestamp
+        self.data.put_u64(key.ts());
         //encode valuesize
         let offset_bytes = (value.len() as u16).to_le_bytes();
         self.data.push(offset_bytes[0]);
         self.data.push(offset_bytes[1]);
         //add value
         self.data.extend_from_slice(value);
-
         if self.first_key.is_empty() {
             self.first_key = key.to_key_vec();
         }

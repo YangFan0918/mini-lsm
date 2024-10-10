@@ -1,9 +1,7 @@
-#![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
-#![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
-
 use std::{cmp::Ordering, sync::Arc};
 
 use crate::key::{KeySlice, KeyVec};
+use bytes::Buf;
 
 use super::Block;
 
@@ -49,18 +47,12 @@ impl BlockIterator {
 
     /// Returns the key of the current entry.
     pub fn key(&self) -> KeySlice {
-        let key_len = u16::from_le_bytes([self.key.raw_ref()[0], self.key.raw_ref()[1]]) as usize;
-        KeySlice::from_slice(&self.key.raw_ref()[2..2 + key_len])
+        self.key.as_key_slice()
     }
 
     /// Returns the value of the current entry.
     pub fn value(&self) -> &[u8] {
-        let key_len = u16::from_le_bytes([self.key.raw_ref()[0], self.key.raw_ref()[1]]) as usize;
-        let value_len = u16::from_le_bytes([
-            self.key.raw_ref()[2 + key_len],
-            self.key.raw_ref()[3 + key_len],
-        ]) as usize;
-        &self.key.raw_ref()[4 + key_len..]
+        &self.block.data[self.value_range.0..self.value_range.1]
     }
 
     /// Returns true if the iterator is valid.
@@ -78,10 +70,14 @@ impl BlockIterator {
                 self.block.offsets[1]
             }
         };
-        self.key = KeyVec::from_vec(self.block.data[2..end as usize].to_vec());
-        let key_len = u16::from_le_bytes([self.key.raw_ref()[0], self.key.raw_ref()[1]]);
+        let key_remain_len = u16::from_le_bytes([self.block.data[2], self.block.data[3]]);
+        let key_vec = self.block.data[4..4 + key_remain_len as usize].to_vec();
+        let ts =
+            (&self.block.data[4 + key_remain_len as usize..12 + key_remain_len as usize]).get_u64();
+        self.key = KeyVec::from_vec_with_ts(key_vec, ts);
+        self.first_key = self.key.clone();
         self.idx = 0;
-        self.first_key = KeyVec::from_vec(self.key.raw_ref()[2..2 + key_len as usize].to_vec());
+        self.value_range = ((key_remain_len + 14) as usize, end as usize);
     }
 
     /// Move to the next key in the block.
@@ -102,14 +98,13 @@ impl BlockIterator {
             self.idx = now_idx + 1;
             let entry = self.block.data[start as usize..end as usize].to_vec();
             let key_overlap_len = u16::from_le_bytes([entry[0], entry[1]]);
-            let rest_key_len = u16::from_le_bytes([entry[2], entry[3]]);
-            self.key.clear();
-            let combined_len = key_overlap_len + rest_key_len;
-            let combined_len_bytes = combined_len.to_le_bytes();
-            self.key.append(&combined_len_bytes);
-            self.key
-                .append(&self.first_key.raw_ref()[..key_overlap_len as usize]);
-            self.key.append(&entry[4..]);
+            let key_remain_len = u16::from_le_bytes([entry[2], entry[3]]);
+            let mut key = self.first_key.key_ref()[..key_overlap_len as usize].to_vec();
+            key.extend(&entry[4..4 + key_remain_len as usize]);
+            let ts =
+                (&entry[4 + key_remain_len as usize..(4 + key_remain_len + 8) as usize]).get_u64();
+            self.key = KeyVec::from_vec_with_ts(key, ts);
+            self.value_range = ((key_remain_len + 14 + start) as usize, end as usize);
         }
     }
 

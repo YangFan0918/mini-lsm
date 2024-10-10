@@ -9,11 +9,11 @@ use crate::iterators::concat_iterator::SstConcatIterator;
 use crate::iterators::merge_iterator::MergeIterator;
 use crate::iterators::two_merge_iterator::TwoMergeIterator;
 use crate::iterators::StorageIterator;
-use crate::key::KeyBytes;
 use crate::key::KeySlice;
+use crate::key::{KeyBytes, TS_DEFAULT};
 use crate::lsm_iterator::{FusedIterator, LsmIterator};
 use crate::manifest::{Manifest, ManifestRecord};
-use crate::mem_table::{self, MemTable};
+use crate::mem_table::MemTable;
 use crate::mvcc::LsmMvccInner;
 use crate::table::FileObject;
 use crate::table::SsTableBuilder;
@@ -30,7 +30,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 pub type BlockCache = moka::sync::Cache<(usize, usize), Arc<Block>>;
-
+use crate::key::TS_RANGE_BEGIN;
 pub fn range_over(
     left: Bound<&[u8]>,
     right: Bound<&[u8]>,
@@ -38,19 +38,19 @@ pub fn range_over(
     upper: &KeyBytes,
 ) -> bool {
     match right {
-        Bound::Excluded(v) if v <= lower.raw_ref() => {
+        Bound::Excluded(v) if v <= lower.key_ref() => {
             return false;
         }
-        Bound::Included(v) if v < lower.raw_ref() => {
+        Bound::Included(v) if v < lower.key_ref() => {
             return false;
         }
         _ => {}
     };
     match left {
-        Bound::Excluded(v) if upper.raw_ref() <= v => {
+        Bound::Excluded(v) if upper.key_ref() <= v => {
             return false;
         }
-        Bound::Included(v) if upper.raw_ref() < v => {
+        Bound::Included(v) if upper.key_ref() < v => {
             return false;
         }
         _ => {}
@@ -476,7 +476,7 @@ impl LsmStorageInner {
             }
             //imm_emetables里没有
             //需要到SST里面找
-            let key = KeySlice::from_slice(_key);
+            let key = KeySlice::from_slice(_key, TS_RANGE_BEGIN);
             let mut sst_iterator_vec = Vec::new();
             for sst_id in &snapshot.l0_sstables {
                 if let Some(sst) = snapshot.sstables.get(sst_id) {
@@ -500,20 +500,20 @@ impl LsmStorageInner {
                     .collect::<Vec<_>>();
                 level_iterator_vec.push(Box::new(SstConcatIterator::create_and_seek_to_key(
                     vec_arc_sst,
-                    KeySlice::from_slice(_key),
+                    KeySlice::from_slice(_key, TS_RANGE_BEGIN),
                 )?));
             }
 
             let sst_ierator = MergeIterator::create(sst_iterator_vec);
             let l1_iterator = MergeIterator::create(level_iterator_vec);
             if sst_ierator.is_valid() || l1_iterator.is_valid() {
-                if sst_ierator.is_valid() && sst_ierator.key().raw_ref() == _key {
+                if sst_ierator.is_valid() && sst_ierator.key().key_ref() == _key {
                     if sst_ierator.value().is_empty() {
                         return Ok(None);
                     } else {
                         return Ok(Some(Bytes::copy_from_slice(sst_ierator.value())));
                     }
-                } else if l1_iterator.is_valid() && l1_iterator.key().raw_ref() == _key {
+                } else if l1_iterator.is_valid() && l1_iterator.key().key_ref() == _key {
                     if !l1_iterator.value().is_empty() {
                         return Ok(Some(Bytes::copy_from_slice(l1_iterator.value())));
                     } else {
@@ -713,9 +713,9 @@ impl LsmStorageInner {
 
         let mut sst_iterators = Vec::new();
         let lower_key = match _lower {
-            Bound::Included(key) => KeySlice::from_slice(key),
-            Bound::Excluded(key) => KeySlice::from_slice(key),
-            Bound::Unbounded => KeySlice::from_slice(&[]),
+            Bound::Included(key) => KeySlice::from_slice(key, TS_RANGE_BEGIN),
+            Bound::Excluded(key) => KeySlice::from_slice(key, TS_RANGE_BEGIN),
+            Bound::Unbounded => KeySlice::from_slice(&[], TS_RANGE_BEGIN),
         };
 
         let upper_key = match _upper {
@@ -754,7 +754,7 @@ impl LsmStorageInner {
         match _lower {
             Bound::Included(key) => {}
             Bound::Excluded(key) => {
-                while lsmiterator.is_valid() && lsmiterator.key() <= lower_key.raw_ref() {
+                while lsmiterator.is_valid() && lsmiterator.key() <= lower_key.key_ref() {
                     lsmiterator.next()?;
                 }
             }

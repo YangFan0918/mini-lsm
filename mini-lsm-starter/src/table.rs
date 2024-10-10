@@ -38,10 +38,14 @@ impl BlockMeta {
         buf.put_u32(block_meta.len() as u32);
         for mate in block_meta {
             buf.put_u32(mate.offset as u32);
-            buf.put_u16(mate.first_key.len() as u16);
-            buf.put_slice(mate.first_key.raw_ref());
-            buf.put_u16(mate.last_key.len() as u16);
-            buf.put_slice(mate.last_key.raw_ref());
+
+            buf.put_u16(mate.first_key.key_len() as u16);
+            buf.put_slice(mate.first_key.key_ref());
+            buf.put_u64(mate.first_key.ts());
+
+            buf.put_u16(mate.last_key.key_len() as u16);
+            buf.put_slice(mate.last_key.key_ref());
+            buf.put_u64(mate.last_key.ts());
         }
     }
 
@@ -51,10 +55,17 @@ impl BlockMeta {
         let meta_number = buf.get_u32();
         for _ in 0..meta_number {
             let offset = buf.get_u32() as usize;
+
             let first_key_size = buf.get_u16();
-            let first_key = KeyBytes::from_bytes(buf.copy_to_bytes(first_key_size as usize));
+            let first_key = buf.copy_to_bytes(first_key_size as usize);
+            let first_key_ts = buf.get_u64();
+            let first_key = KeyBytes::from_bytes_with_ts(first_key, first_key_ts);
+
             let last_key_size = buf.get_u16();
-            let last_key = KeyBytes::from_bytes(buf.copy_to_bytes(last_key_size as usize));
+            let last_key = buf.copy_to_bytes(last_key_size as usize);
+            let last_key_ts = buf.get_u64();
+            let last_key = KeyBytes::from_bytes_with_ts(last_key, last_key_ts);
+
             block_meta.push(BlockMeta {
                 offset,
                 first_key,

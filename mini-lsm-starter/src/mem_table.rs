@@ -5,16 +5,16 @@ use std::path::Path;
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 
+use crate::iterators::StorageIterator;
+use crate::key::KeySlice;
+use crate::key::TS_DEFAULT;
+use crate::table::SsTableBuilder;
+use crate::wal::Wal;
 use anyhow::Result;
 use bytes::Bytes;
 use crossbeam_skiplist::map::Entry;
 use crossbeam_skiplist::SkipMap;
 use ouroboros::self_referencing;
-
-use crate::iterators::StorageIterator;
-use crate::key::KeySlice;
-use crate::table::SsTableBuilder;
-use crate::wal::Wal;
 
 /// A basic mem-table based on crossbeam-skiplist.
 ///
@@ -143,7 +143,7 @@ impl MemTable {
         for entry in self.map.iter() {
             let key = entry.key();
             let value = entry.value();
-            _builder.add(KeySlice::from_slice(key), value);
+            _builder.add(KeySlice::from_slice(key, TS_DEFAULT), value);
         }
         Ok(())
     }
@@ -196,7 +196,7 @@ impl StorageIterator for MemTableIterator {
     }
 
     fn key(&self) -> KeySlice {
-        KeySlice::from_slice(self.borrow_item().0.as_ref())
+        KeySlice::from_slice(self.borrow_item().0.as_ref(), TS_DEFAULT)
     }
 
     fn is_valid(&self) -> bool {

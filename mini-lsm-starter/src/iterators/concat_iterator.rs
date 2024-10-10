@@ -46,7 +46,7 @@ impl SstConcatIterator {
             let mut r = len - 1;
             while l < r {
                 let mid = (l + r) / 2;
-                if sstables[mid].last_key().raw_ref() < key.raw_ref() {
+                if sstables[mid].last_key().key_ref() < key.key_ref() {
                     l = mid + 1;
                 } else {
                     r = mid;
